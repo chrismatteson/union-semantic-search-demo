@@ -215,9 +215,24 @@ if st.button("Search", key="do_search") and query_text.strip():
             st.info("No chunks within distance threshold.")
         else:
             for d in filtered:
-                st.markdown(
-                    f"**ID:** `{d.get('id','n/a')}` • **distance:** {d.get('distance',0):.3f}"
+                header = (
+                    f"**ID:** `{d.get('id','n/a')}` • "
+                    f"**distance:** {d.get('distance',0):.3f}"
                 )
+                title = d.get("title")
+                date = d.get("date")
+                if title:
+                    header += f" • **title:** _{title}_"
+                if date:
+                    # Try to pretty-print YYYY-MM-DD dates
+                    try:
+                        dt = datetime.fromisoformat(date)
+                        date_str = dt.strftime("%b %d, %Y")
+                    except Exception:
+                        date_str = date
+                    header += f" • **date:** {date_str}"
+
+                st.markdown(header)
                 st.write(d.get("document", ""))
                 st.markdown("---")
     except Exception as e:

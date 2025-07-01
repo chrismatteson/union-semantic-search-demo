@@ -105,6 +105,7 @@ def download_csv() -> union.FlyteDirectory:
     
     import os
     import csv
+    import json
     import requests
 
     CSV_URL = 'https://huggingface.co/datasets/sgoel9/paul_graham_essays/raw/main/pual_graham_essays.csv'
@@ -128,9 +129,15 @@ def download_csv() -> union.FlyteDirectory:
             essay_date = row[2]
             essay_text = row[3]
             text_fp = f"{documents_dir}/{essay_id}.txt"
+            meta_fp = f"{documents_dir}/{essay_id}.json"
             print(f"writing text to {text_fp}")
             with open(text_fp, "wb") as f:
                 f.write(essay_text.encode("utf-8"))
+            with open(meta_fp, "wb") as f:
+                f.write(json.dumps({
+                    "title": essay_title,
+                    "date": essay_date
+                }).encode("utf-8"))
 
     return union.FlyteDirectory(documents_dir)
 
@@ -185,11 +192,13 @@ def create_vector_store(
     from chromadb.config import Settings
     import pyarrow as pa
     import tqdm
+    import json
     from pathlib import Path
     from sentence_transformers import SentenceTransformer
 
     sentence_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL,            # loads with SentenceTransformer under the hood
+        device="cuda"
     )
 
     # Create a ChromaDB database and table.
@@ -204,6 +213,7 @@ def create_vector_store(
     documents_dir: Path = Path(documents_dir)
 
     document_paths = list(documents_dir.glob("**/*.txt"))
+    meta_paths = list(documents_dir.glob("**/*.json"))
 
     # Iterate through the documents and add them to the vector store.
     for i, document_fp in tqdm.tqdm(
@@ -221,12 +231,18 @@ def create_vector_store(
         if not chunks:
             print(f"Warning: No chunks generated for {document_fp.name}, skipping...")
             continue
-            
+
+        with open(meta_paths[i], "rb") as f:
+            meta = json.load(f)  
+
         collection.add(
             documents=chunks,
             ids=[f"{document_fp.stem}_{i}" for i in range(len(chunks))],
+            metadatas=[meta] * len(chunks)
         )
 
+    # Assert the on-disk index so it is visible outside the actor container.
+    assert Path(chromadb_dir).is_dir(), "Directory missing"
     return union.FlyteDirectory(chromadb_dir)
 
 
@@ -252,6 +268,7 @@ def retrieve_documents(
     # Create the same embedding function used during creation
     sentence_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
         model_name=EMBEDDING_MODEL,
+        device="cuda"
     )
 
     # Load the ChromaDB database and collection with telemetry disabled
@@ -262,7 +279,7 @@ def retrieve_documents(
     results = collection.query(
         query_texts=[query],
         n_results=min(max_results, collection.count()),  # Don't exceed available documents
-        include=["documents", "distances"]
+        include=["documents", "distances", "metadatas"]
     )
 
     # Format the results into a more readable structure
@@ -271,6 +288,8 @@ def retrieve_documents(
         for i, doc in enumerate(results['documents'][0]):
             documents.append({
                 'document': doc,
+                'title': results['metadatas'][0][i]['title'],
+                'date': results['metadatas'][0][i]['date'],
                 'distance': results['distances'][0][i] if results['distances'] else None,
                 'id': results['ids'][0][i] if results['ids'] else None
             })
@@ -282,7 +301,7 @@ def retrieve_documents(
 def query_essays(
     query: str,
     max_results: int = 5,
-    vector_store: union.FlyteDirectory = SemanticVectorStore.query(),
+    vector_store: FlyteDirectory = SemanticVectorStore.query()
 ) -> list[dict]:
     """Query an existing vector store for relevant Paul Graham essays."""
     return retrieve_documents(vector_store, query, max_results)
