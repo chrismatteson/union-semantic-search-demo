@@ -3,7 +3,7 @@ import json
 import requests
 import streamlit as st
 import union
-from streamlit_autorefresh import st_autorefresh  # type: ignore
+from flytekit.configuration import Config
 
 # ---------------- Sidebar -----------------
 with st.sidebar:
@@ -14,11 +14,30 @@ with st.sidebar:
         "qwen-service endpoint",
         value=os.getenv("QWEN_ENDPOINT", "https://summer-glade-f277a.apps.serverless-1.us-east-2.s.union.ai"),
     )
+    # --- Retrieval config --------------------------------------------------
+    st.divider()
+    st.markdown("**Retrieval settings (Paul-Graham essays)**")
+
+    union_endpoint = st.text_input(
+        "Union API endpoint",
+        value=os.getenv("UNION_ENDPOINT", "https://serverless.union.ai"),
+        help="https://<host> part of the URL in the Union UI.",
+    )
+    union_project = st.text_input("Project", value=os.getenv("UNION_PROJECT", "default"))
+    union_domain = st.text_input("Domain", value=os.getenv("UNION_DOMAIN", "development"))
+
+    retrieval_max_results = st.number_input(
+        "Max retrieved chunks", min_value=1, max_value=5, value=3, step=1
+    )
+    retrieval_max_distance = st.slider(
+        "Max distance", min_value=0.0, max_value=2.0, value=1.2, step=0.05
+    )
     st.markdown("[Union docs](https://www.union.ai)")
 
 # ---------------- Status indicator -----------------
-# Refresh every 5 seconds
-st_autorefresh(interval=5000, key="qwen_status_tick_chat")
+# We intentionally *do not* use `st_autorefresh` here.  Auto-refreshing the
+# page while a retrieval or LLM call is in flight would wipe the spinners and
+# UI state.  Instead we run `service_ready()` once per script execution.
 
 if "_qwen_status_box_chat" not in st.session_state:
     st.session_state["_qwen_status_box_chat"] = st.sidebar.empty()
@@ -56,14 +75,73 @@ service_ready()
 
 # ---------------- Remote completion helper -----------------
 
-def remote_completion(history: list[dict[str, str]]) -> str | None:
-    if not qwen_endpoint:
-        st.error("⚠️ Provide the qwen-service endpoint in the sidebar or QWEN_ENDPOINT env var.")
-        return None
+def _get_remote(endpoint: str, project: str, domain: str, api_key: str) -> union.UnionRemote:
+    key = (endpoint, project, domain)
+    if "_union_remote_cache" not in st.session_state:
+        st.session_state["_union_remote_cache"] = {}
+    cache = st.session_state["_union_remote_cache"]
+    if key not in cache:
+        cache[key] = union.UnionRemote.from_api_key(
+            api_key.strip(),
+            default_project=project,
+            default_domain=domain,
+            endpoint=endpoint,
+        )
+    return cache[key]
+
+
+def _get_launch_plan(remote: union.UnionRemote):
+    return remote.fetch_launch_plan(name="download-chunk-embed.main")
+
+
+def query_essays_remote(
+    query: str,
+    max_results: int,
+    endpoint: str,
+    project: str,
+    domain: str,
+    api_key: str,
+) -> list[dict]:
+    """Execute the launch plan synchronously and return list-of-dict result."""
+
+    remote = _get_remote(endpoint, project, domain, api_key)
+    lp = _get_launch_plan(remote)
+    exec = remote.execute(
+        lp,
+        inputs={"query": query, "max_results": max_results},
+        wait=True,
+        type_hints={"o0": str, "o1": list[dict]},
+    )
+
+    raw_docs = exec.outputs.get("o1") or []
+    if raw_docs and isinstance(raw_docs[0], str):
+        try:
+            return [json.loads(x) for x in raw_docs]
+        except Exception:
+            return []
+    return raw_docs
+
+
+def remote_completion(history: list[dict[str, str]], context_docs: list[dict] | None = None) -> str | None:
+    # Prepend context as a system message if available.
+    messages = history.copy()
+    if context_docs:
+        context_text = "\n\n---\n\n".join(d.get("document", "") for d in context_docs)
+        # Strict RAG instruction: answer ONLY from context.
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are a question-answering assistant. Use ONLY the information "
+                "provided in the CONTEXT below to answer the user's question. If the answer "
+                "is not contained in the context, reply with 'I don't know.'\n\n"
+                "CONTEXT:\n" + context_text
+            ),
+        }
+        messages = [system_msg] + messages
 
     payload = {
         "model": "qwen2",
-        "messages": history,
+        "messages": messages,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
     }
@@ -109,8 +187,32 @@ if prompt:
     if not service_ready():
         st.error("qwen-service is not available right now.")
     else:
+        # ----------------------------------------------------
+        # 1) Retrieve relevant chunks for the prompt
+        # ----------------------------------------------------
+        docs: list[dict] = []
+        if union_api_key and union_endpoint:
+            try:
+                with st.spinner("Retrieving context …"):
+                    docs = query_essays_remote(
+                        query=prompt,
+                        max_results=int(retrieval_max_results),
+                        endpoint=union_endpoint,
+                        project=union_project,
+                        domain=union_domain,
+                        api_key=union_api_key,
+                    )
+
+                docs = [d for d in docs if d.get("distance", 1.0) <= retrieval_max_distance]
+            except Exception as e:
+                st.warning(f"RAG retrieval failed: {e}")
+
+        # ----------------------------------------------------
+        # 2) Send prompt + context to the LLM
+        # ----------------------------------------------------
         reply = remote_completion(
-            [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+            [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages],
+            context_docs=docs,
         ) or "❗️Error calling qwen-service."
         st.session_state.messages.append({"role": "assistant", "content": reply})
         chat_container.chat_message("assistant").write(reply) 
