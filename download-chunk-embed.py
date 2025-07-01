@@ -8,7 +8,8 @@
 # https://github.com/unionai/unionai-examples/blob/main/tutorials/vector_store_lance_db/vector_store_lance_db.py
 # https://stackoverflow.com/questions/35371043/use-python-requests-to-download-csv
 # https://notes.alexkehayias.com/turn-off-chroma-telemetry-in-langchain/
-# 
+# https://docs.trychroma.com/docs/overview/telemetry
+#
 # First, let's import the workflow dependencies:
 
 import os
@@ -87,7 +88,7 @@ class VectorStoreConfig:
     # the documents by the first delimiter. If the chunk is still larger than
     # the maximum chunk size, it will try to split the document by the second
     # delimiter, and so on.
-    chunk_delimiters: list[str] = field(default_factory=lambda: ["_____", "___", "* * *", "**", "\n\n", ".\n"])
+    chunk_delimiters: list[str] = field(default_factory=lambda: ["\\_\\_\\_\\_\\_", "\\_\\_\\_", "\\* \\* \\*", "^**", "\n\n", ".\n"])
 
     # Approximate chunk size in characters
     approximate_chunk_size: int = 500
@@ -95,7 +96,10 @@ class VectorStoreConfig:
 
 
 # ### Download the essays
-@actor.task(container_image=image, cache=True, cache_version="0")
+@actor.task(
+    cache=True,
+    cache_version="0"
+)
 def download_csv() -> union.FlyteDirectory:
     """Download the essays from the csv file given a query."""
     
@@ -168,9 +172,8 @@ def chunk_document(document: str, config: VectorStoreConfig) -> list[str]:
     return chunks
 
 @actor.task(
-    container_image=image,
     cache=True,
-    cache_version="3",
+    cache_version="0",
 )
 def create_vector_store(
     documents_dir: union.FlyteDirectory,
@@ -228,7 +231,6 @@ def create_vector_store(
 
 
 @actor.task(
-    container_image=image,
     cache=True,
     cache_version="0",
 )
