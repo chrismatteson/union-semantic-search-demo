@@ -8,20 +8,6 @@ import union
 # --------------------------- Sidebar inputs ---------------------------------
 with st.sidebar:
     union_api_key = st.text_input("Union API Key", key="union_api_key", type="password")
-    artifact_name = st.text_input(
-        "Qwen Artifact URI",
-        value="flyte://av0.2/chrismatteson/default/development/qwen-2_5-0_5B-Instruct@ap6cbd7l8dvgz965xfl4/n0/0/o0",
-    )
-    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.2, step=0.05)
-    max_tokens = st.number_input("Max tokens", min_value=16, max_value=2048, value=512)
-    qwen_endpoint = st.text_input(
-        "qwen-service endpoint",
-        value=os.getenv("QWEN_ENDPOINT", "https://summer-glade-f277a.apps.serverless-1.us-east-2.s.union.ai"),
-    )
-    st.markdown("[Union docs](https://www.union.ai)")
-
-    st.divider()
-    st.subheader("Union control plane")
     union_endpoint = st.text_input(
         "Union API endpoint",
         value=os.getenv("UNION_ENDPOINT", "https://serverless.union.ai"),
@@ -29,6 +15,13 @@ with st.sidebar:
     )
     union_project = st.text_input("Project", value=os.getenv("UNION_PROJECT", "default"))
     union_domain = st.text_input("Domain", value=os.getenv("UNION_DOMAIN", "development"))
+
+    qwen_endpoint = st.text_input(
+        "qwen-service endpoint",
+        value=os.getenv("QWEN_ENDPOINT", "https://summer-glade-f277a.apps.serverless-1.us-east-2.s.union.ai"),
+    )
+    st.markdown("[Union docs](https://www.union.ai)")
+
 
 # --------------------------- Service Status Indicator -----------------------
 
@@ -137,33 +130,39 @@ def remote_completion(endpoint: str, history: list[dict[str, str]], api_key: str
 # `query_essays_remote`.
 
 
-@st.cache_data(show_spinner=False, max_entries=5)
+# Build UnionRemote once per session (avoid Streamlit pickling problems)
 def _get_remote(endpoint: str, project: str, domain: str, api_key: str) -> union.UnionRemote:
-    """Return a UnionRemote client using client-credentials auth."""
-    cfg = Config(
-        platform=PlatformConfig(
+    cfg = Config.for_endpoint(endpoint=endpoint, insecure=False)
+    key = (endpoint, project, domain)
+    if "_union_remote_cache" not in st.session_state:
+        st.session_state["_union_remote_cache"] = {}
+    cache = st.session_state["_union_remote_cache"]
+    if key not in cache:
+        cache[key] = union.UnionRemote.from_api_key(
+            api_key.strip(),
+            default_project=project,
+            default_domain=domain,
             endpoint=endpoint,
-            auth_mode="client_credentials",
-            client_id=project,  # key name
-            client_credentials_secret=api_key.strip() if api_key else "",
-            insecure=False,
         )
-    )
-    return union.UnionRemote(config=cfg, default_project=project, default_domain=domain)
+    return cache[key]
 
 
 def _get_launch_plan(remote: union.UnionRemote):
-    """Fetch the latest *download-chunk-embed.query_essays* launch plan."""
-    return remote.fetch_launch_plan(name="download-chunk-embed.query_essays")
+    """Fetch the latest *download-chunk-embed.main* launch plan."""
+    return remote.fetch_launch_plan(name="download-chunk-embed.main")
 
 
 def query_essays_remote(query: str, max_results: int, endpoint: str, project: str, domain: str, api_key: str) -> list[dict]:
     """Execute the launch plan synchronously and return the list-of-dict result."""
     remote = _get_remote(endpoint, project, domain, api_key)
     lp = _get_launch_plan(remote)
-    exec = remote.execute(lp, inputs={"query": query, "max_results": max_results}, wait=True)
-    # The workflow returns list[dict] as its sole output.
-    return exec.outputs.get("o0") or []
+    exec = remote.execute(
+        lp,
+        inputs={"query": query, "max_results": max_results},
+        wait=True,
+        type_hints={"o0": str, "o1": list},
+    )
+    return exec.outputs.get("o1") or []
 
 # --------------------------- Query / Search page -----------------------------
 
