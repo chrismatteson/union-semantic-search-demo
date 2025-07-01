@@ -25,11 +25,6 @@ with st.sidebar:
 
 # --------------------------- Service Status Indicator -----------------------
 
-# Autorefresh sidebar status every 5 s
-from streamlit_autorefresh import st_autorefresh  # type: ignore
-
-st_autorefresh(interval=5000, key="qwen_status_tick")
-
 # Re-use the same placeholder across reruns
 if "_qwen_status_box_main" not in st.session_state:
     st.session_state["_qwen_status_box_main"] = st.sidebar.empty()
@@ -160,9 +155,29 @@ def query_essays_remote(query: str, max_results: int, endpoint: str, project: st
         lp,
         inputs={"query": query, "max_results": max_results},
         wait=True,
-        type_hints={"o0": str, "o1": list},
+        # Tell the SDK what the outputs are so it can deserialize them properly.
+        # o0 = vector-store URI (ignored here), o1 = list[dict]
+        type_hints={
+            "o0": str,
+            "o1": list[dict],  # requires Python 3.9+ built-in generics
+        },
     )
-    return exec.outputs.get("o1") or []
+
+    # Flyte may still give us a list of JSON strings if it cannot infer the
+    # inner dict type.  Detect that case and decode manually.
+    raw_docs = exec.outputs.get("o1") or []
+
+    if raw_docs and isinstance(raw_docs[0], str):
+        try:
+            docs = [json.loads(x) for x in raw_docs]
+        except Exception as e:
+            # Surface a helpful error in the UI and return empty list
+            st.error(f"Failed to decode workflow output: {e}")
+            docs = []
+    else:
+        docs = raw_docs
+
+    return docs
 
 # --------------------------- Query / Search page -----------------------------
 
@@ -170,9 +185,18 @@ st.header("Retrieve Paul-Graham essay chunks")
 
 query_text = st.text_input("Query", key="search_query")
 max_results = st.number_input("Max results", min_value=1, max_value=20, value=5)
-max_distance = st.slider("Max distance", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
+max_distance = st.slider(
+    "Max distance (0 = identical, >1 = less similar)",
+    min_value=0.0,
+    max_value=2.0,
+    value=1.2,
+    step=0.05,
+)
 
 if st.button("Search", key="do_search") and query_text.strip():
+    # Signal that a long operation is underway so autorefresh pauses.
+    st.session_state["_search_in_progress"] = True
+
     try:
         with st.spinner("Querying workflow …"):
             docs = query_essays_remote(
@@ -191,8 +215,13 @@ if st.button("Search", key="do_search") and query_text.strip():
             st.info("No chunks within distance threshold.")
         else:
             for d in filtered:
-                st.markdown(f"**ID:** `{d.get('id','n/a')}` • **distance:** {d.get('distance',0):.3f}")
+                st.markdown(
+                    f"**ID:** `{d.get('id','n/a')}` • **distance:** {d.get('distance',0):.3f}"
+                )
                 st.write(d.get("document", ""))
                 st.markdown("---")
     except Exception as e:
         st.error(f"Search failed: {e}")
+    finally:
+        # Re-enable autorefresh on the next run.
+        st.session_state["_search_in_progress"] = False
